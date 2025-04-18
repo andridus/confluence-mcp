@@ -164,6 +164,7 @@ const server = new Server(
  * - get_current_sprint: 현재 활성 스프린트 조회
  * - get_epic_issues: 에픽에 속한 모든 이슈 조회
  * - get_user_issues: 특정 보드에서 특정 유저와 관련된 모든 이슈 조회
+ * - get_issue_worklogs: Jira 이슈의 워크로그 조회
  *
  * 각 도구는 다음 정보를 포함합니다:
  * - 이름과 설명
@@ -463,6 +464,38 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ["boardId", "username"],
+        },
+      },
+      {
+        name: "get_issue_worklogs",
+        description: "Get all worklogs for a Jira issue",
+        inputSchema: {
+          type: "object",
+          properties: {
+            issueIdOrKey: {
+              type: "string",
+              description: "Issue ID or key (e.g. PROJ-123)",
+            },
+            startAt: {
+              type: "integer",
+              description: "The index of the first item to return in the page of results",
+              default: 0,
+            },
+            maxResults: {
+              type: "integer",
+              description: "The maximum number of items to return per page",
+              default: 50,
+            },
+            startedAfter: {
+              type: "integer",
+              description: "The worklog start date and time in epoch seconds to filter from",
+            },
+            startedBefore: {
+              type: "integer",
+              description: "The worklog start date and time in epoch seconds to filter until",
+            },
+          },
+          required: ["issueIdOrKey"],
         },
       },
     ],
@@ -958,6 +991,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
+    case "get_issue_worklogs": {
+      const issueIdOrKey = String(request.params.arguments?.issueIdOrKey);
+      const startAt = Number(request.params.arguments?.startAt ?? 0);
+      const maxResults = Number(request.params.arguments?.maxResults ?? 50);
+      const startedAfter = request.params.arguments?.startedAfter ?
+        Number(request.params.arguments.startedAfter) : undefined;
+      const startedBefore = request.params.arguments?.startedBefore ?
+        Number(request.params.arguments.startedBefore) : undefined;
+
+      if (!issueIdOrKey) {
+        throw new Error("Issue ID or key is required");
+      }
+
+      const response = await getIssueWorklogs(
+        issueIdOrKey,
+        startAt,
+        maxResults,
+        startedAfter,
+        startedBefore
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(response, null, 2),
+          },
+        ],
+      };
+    }
+
     default:
       throw new Error("Unknown tool");
   }
@@ -1442,6 +1506,88 @@ async function getSprintIssues(
       error: error.response?.data?.errorMessages?.[0] || error.message,
       details: error.response?.data || {},
       status: error.response?.status,
+    };
+  }
+}
+
+/**
+ * Issue 워크로그 조회기
+ *
+ * Jira Issue의 워크로그를 조회합니다.
+ *
+ * @param {string} issueIdOrKey - 이슈 ID 또는 키 (예: PROJ-123)
+ * @param {number} startAt - 결과 페이지에서 반환할 첫 번째 항목의 인덱스
+ * @param {number} maxResults - 페이지당 반환할 최대 항목 수
+ * @param {number} startedAfter - 필터링할 워크로그 시작 날짜 및 시간(에포크 초)
+ * @param {number} startedBefore - 필터링할 워크로그 종료 날짜 및 시간(에포크 초)
+ * @returns {Promise<any>} 워크로그 목록 또는 오류 정보
+ */
+async function getIssueWorklogs(
+  issueIdOrKey: string,
+  startAt: number = 0,
+  maxResults: number = 50,
+  startedAfter?: number,
+  startedBefore?: number
+): Promise<any> {
+  try {
+    // 쿼리 매개변수 구성
+    const params: any = {
+      startAt,
+      maxResults
+    };
+
+    // 선택적 필터 추가
+    if (startedAfter) {
+      params.startedAfter = startedAfter;
+    }
+    if (startedBefore) {
+      params.startedBefore = startedBefore;
+    }
+
+    const response = await axios.get(
+      `${JIRA_URL}/rest/api/2/issue/${issueIdOrKey}/worklog`,
+      {
+        headers: getAuthHeaders().headers,
+        params
+      }
+    );
+
+    // 워크로그 데이터 포맷팅하여 반환
+    const formattedWorklogs = response.data.worklogs.map((worklog: any) => ({
+      id: worklog.id,
+      issueId: worklog.issueId,
+      timeSpent: worklog.timeSpent,
+      timeSpentSeconds: worklog.timeSpentSeconds,
+      started: worklog.started,
+      created: worklog.created,
+      updated: worklog.updated,
+      comment: worklog.comment,
+      author: {
+        accountId: worklog.author?.accountId,
+        displayName: worklog.author?.displayName,
+        active: worklog.author?.active
+      },
+      updateAuthor: {
+        accountId: worklog.updateAuthor?.accountId,
+        displayName: worklog.updateAuthor?.displayName,
+        active: worklog.updateAuthor?.active
+      },
+      visibility: worklog.visibility,
+    }));
+
+    return {
+      success: true,
+      startAt: response.data.startAt,
+      maxResults: response.data.maxResults,
+      total: response.data.total,
+      worklogs: formattedWorklogs
+    };
+  } catch (error: any) {
+    return {
+      success: false,
+      error: error.response?.data?.errorMessages?.[0] || error.message,
+      details: error.response?.data || {},
+      status: error.response?.status
     };
   }
 }
